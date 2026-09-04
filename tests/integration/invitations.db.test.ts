@@ -11,6 +11,7 @@ import {
   assertSupabaseSuccess,
   createAdminClient,
   createAnonClient,
+  createAuthenticatedClientForUser,
   createTestUser,
   signInTestUser,
   requireDbConfig,
@@ -677,6 +678,130 @@ describe("Staff Invitations & Acceptance", () => {
           (row) => row.accepted_at === null && row.accepted_by_user_id === null,
         ),
       ).toBe(true);
+    } finally {
+      await cleanupFixture(adminClient, {
+        providerIds: createdProviderIds,
+        userIds: createdUserIds,
+      });
+    }
+  });
+
+  it("invitation acceptance succeeds when invite and user emails differ only by case", async () => {
+    const adminClient = createAdminClient();
+    const owner = await createTestUser(
+      adminClient,
+      uniqueEmail("owner"),
+      password,
+    );
+    const staff = await createTestUser(
+      adminClient,
+      uniqueEmail("staff"),
+      password,
+    );
+    const ownerAuth = await signInTestUser(owner.email, password);
+    const staffAuth = await signInTestUser(staff.email, password);
+    const createdProviderIds: string[] = [];
+
+    try {
+      const provider = await createProviderAs(ownerAuth.client);
+      createdProviderIds.push(provider.providerId);
+
+      // The invite is stored normalized, so inviting the upper-cased address
+      // must still bind to the lower-cased authenticated user email.
+      const invite = await createInvitationAs(
+        ownerAuth.client,
+        staff.email.toUpperCase(),
+      );
+      expect(invite.email).toBe(staff.email.toLowerCase());
+
+      const accept = await acceptInvitationAs(
+        staffAuth.client,
+        invite.tokenHash,
+      );
+      expect(accept.error).toBeNull();
+    } finally {
+      await cleanupFixture(adminClient, {
+        providerIds: createdProviderIds,
+        userIds: [owner.user.id, staff.user.id],
+      });
+    }
+  });
+
+  it("rejects a NULL-email authenticated user without creating membership or accepting invitation", async () => {
+    const adminClient = createAdminClient();
+    const owner = await createTestUser(
+      adminClient,
+      uniqueEmail("owner"),
+      password,
+    );
+    const ownerAuth = await signInTestUser(owner.email, password);
+    const createdProviderIds: string[] = [];
+    const createdUserIds: string[] = [owner.user.id];
+
+    try {
+      const provider = await createProviderAs(ownerAuth.client, {
+        providerType: "SHOP",
+      });
+      createdProviderIds.push(provider.providerId);
+
+      // Valid SHOP invitation addressed to a normal email.
+      const invite = await createInvitationAs(ownerAuth.client);
+
+      // Phone-only Auth user: auth.users.email IS NULL (verified by
+      // direct Postgres spike). No session is issued by the Admin API; we
+      // mint a short-lived bearer JWT for this UUID via the local stack's
+      // JWT_SECRET (exposed by `supabase status -o env`).
+      const phoneNumber = `+1${Date.now().toString().slice(-10)}${Math.floor(Math.random() * 90 + 10)}`;
+      const phoneResult = await adminClient.auth.admin.createUser({
+        phone: phoneNumber.slice(0, 15),
+        password,
+        phone_confirm: true,
+      });
+      assertSupabaseSuccess(phoneResult, "create phone-only Auth user");
+      const phoneUser = phoneResult.data.user;
+      if (!phoneUser) {
+        throw new Error("[DB fixture] create phone-only user returned no user");
+      }
+      createdUserIds.push(phoneUser.id);
+
+      const nullEmailClient = createAuthenticatedClientForUser(phoneUser.id);
+
+      const result = await acceptInvitationAs(
+        nullEmailClient,
+        invite.tokenHash,
+      );
+
+      // Must be denied at the recipient-binding guard.
+      expect(result.error).not.toBeNull();
+      expect(result.data).toBeNull();
+      expect(result.error?.message).toMatch(
+        /Authenticated email does not match invitation recipient/,
+      );
+
+      // No membership created for the NULL-email user.
+      const memberships = assertSupabaseSuccess(
+        await adminClient
+          .from("provider_memberships")
+          .select("id")
+          .eq("user_id", phoneUser.id)
+          .eq("provider_id", provider.providerId),
+        "read NULL-email membership fixture",
+      );
+      expect(memberships.data).toEqual([]);
+
+      // Invitation remains unaccepted and unsettled.
+      const invitation = assertSupabaseSuccess(
+        await adminClient
+          .from("provider_invitations")
+          .select("accepted_at, accepted_by_user_id")
+          .eq("id", invite.invitationId)
+          .single(),
+        "read NULL-email invitation lifecycle fixture",
+      );
+      expect(invitation.data).toMatchObject({
+        accepted_at: null,
+        accepted_by_user_id: null,
+      });
     } finally {
       await cleanupFixture(adminClient, {
         providerIds: createdProviderIds,

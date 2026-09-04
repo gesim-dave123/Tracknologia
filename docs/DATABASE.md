@@ -300,7 +300,7 @@ npx supabase db push
   - `create_provider_with_owner(...)`: Transactionally provisions new Provider, initial business profile, person profile, and links caller as explicit `OWNER`.
   - `create_provider_with_owner_and_modes(...)`: Composes the accepted creation procedure with description/request configuration and Service Mode replacement in the same transaction.
   - `set_provider_service_modes(service_modes)`: Owner-only atomic replacement of repeating Service Mode configuration, serialized with a Provider-row lock.
-  - `accept_staff_invitation(token_hash, display_name, contact_phone)`: Transactionally locks invitation, verifies SHOP provider and single active membership invariant, creates person profile and `STAFF` membership, marks token accepted, and supersedes every other currently-active pending invitation for the normalized recipient email across Providers.
+  - `accept_staff_invitation(token_hash, display_name, contact_phone)`: Transactionally locks invitation, verifies SHOP provider and single active membership invariant, enforces strict recipient email binding (a missing or mismatched authenticated email is rejected; comparison is case-insensitive), creates person profile and `STAFF` membership, marks token accepted, and supersedes every other currently-active pending invitation for the normalized recipient email across Providers.
   - `create_staff_invitation(email, token_hash)`: OWNER-only, SHOP-only creation
     that enforces the one-active-pending-invitation invariant and the
     recipient-eligibility rule (an active member's email is refused); returns
